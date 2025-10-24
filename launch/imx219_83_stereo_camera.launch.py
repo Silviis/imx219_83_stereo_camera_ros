@@ -1,60 +1,104 @@
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import PathJoinSubstitution
-
-from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
+from launch_ros.actions import ComposableNodeContainer
+from launch_ros.descriptions import ComposableNode
 
 
 def generate_launch_description():
-    ld = []
-
-    stereo_camera_left = Node(
-        package='gscam',
-        executable='gscam_node',
-        name='stereo_camera_rawimage_publisher_left',
-        output='screen',
-        emulate_tty=True,
-        parameters=[
-            {
-                # Set the name to correspond the camera_info topic name
-                'camera_name': 'stereo',
-
-                # Camera calibration file
-                'camera_info_url': 'package://imx219_83_stereo_camera/calibration/left.yaml',
-
-                # GStreamer config string
-                'gscam_config': 'v4l2src device=/dev/video0 ! video/x-raw,framerate=30 ! videoconvert',
-                
-                # TF2 frame id
-                'frame_id': 'stereo_camera_left',
-
-                # Re-open the stream if it ends (EOF)
-                'reopen_on_eof': True,
-
-                # Synchronize the app sink (sometimes setting this to false can
-                # resolve problems with sub-par framerates)
-                'sync_sink': True,
-
-                # Use the GStreamer buffer timestamps for the image message
-                # header timestamps (setting this to false results in header
-                # timestamps being the time that the image buffer transfer is
-                # completed)
-                'use_gst_timestamps': True,
-
-                # “rgb8”, “mono8”, “yuv422”, “jpeg”
-                'image_encoding': 'rgb8',
-                
-                # The flag to use sensor data qos for camera topic(image, camera_info)
-                'use_sensor_data_qos': True
-            }
-        ]
-
+    # GStreamer pipelines for left & right cameras
+    gscam_left_config = (
+        'v4l2src device=/dev/video0 ! '
+        'video/x-raw,format=YUY2,width=640,height=480,framerate=30/1 ! '
+        'videoconvert ! appsink'
     )
-    ld.append(stereo_camera_left)
 
+    gscam_right_config = (
+        'v4l2src device=/dev/video1 ! '
+        'video/x-raw,format=YUY2,width=640,height=480,framerate=30/1 ! '
+        'videoconvert ! appsink'
+    )
 
+    # Calibration files (update these paths to match your package)
+    left_info_url = 'package://imx219_83_stereo_camera/calibration/left.yaml'
+    right_info_url = 'package://imx219_83_stereo_camera/calibration/right.yaml'
 
+    container = ComposableNodeContainer(
+        name='stereo_gscam_container',
+        namespace='',
+        package='rclcpp_components',
+        executable='component_container_mt',  # multithreaded container
+        composable_node_descriptions=[
+            # --- LEFT CAMERA ---
+            ComposableNode(
+                package='gscam',
+                plugin='gscam::GSCam',
+                name='gscam_left',
+                namespace='stereo/left',
+                parameters=[{
+                    'gscam_config': gscam_left_config,
+                    'camera_info_url': left_info_url,
+                    'frame_id': 'stereo_left_frame',
+                    'use_gst_timestamps': True,
+                }],
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
 
-    return LaunchDescription(ld)
+            # --- RIGHT CAMERA ---
+            ComposableNode(
+                package='gscam',
+                plugin='gscam::GSCam',
+                name='gscam_right',
+                namespace='stereo/right',
+                parameters=[{
+                    'gscam_config': gscam_right_config,
+                    'camera_info_url': right_info_url,
+                    'frame_id': 'stereo_right_frame',
+                    'use_gst_timestamps': True,
+                }],
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+
+            # --- RECTIFICATION ---
+            ComposableNode(
+                package='image_proc',
+                plugin='image_proc::RectifyNode',
+                name='rectify_left',
+                namespace='stereo/left',
+                remappings=[
+                    ('image', 'image_raw'),
+                    ('image_rect', 'image_rect'),
+                ],
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+
+            ComposableNode(
+                package='image_proc',
+                plugin='image_proc::RectifyNode',
+                name='rectify_right',
+                namespace='stereo/right',
+                remappings=[
+                    ('image', 'image_raw'),
+                    ('image_rect', 'image_rect'),
+                ],
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+
+            # --- STEREO IMAGE PROCESSING ---
+            ComposableNode(
+                package='stereo_image_proc',
+                plugin='stereo_image_proc::DisparityNode',
+                name='disparity_node',
+                namespace='stereo',
+                remappings=[
+                    ('left/image_rect', 'left/image_rect'),
+                    ('right/image_rect', 'right/image_rect'),
+                    ('left/camera_info', 'left/camera_info'),
+                    ('right/camera_info', 'right/camera_info'),
+                    ('disparity', 'disparity'),
+                ],
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+        ],
+        output='screen',
+    )
+
+    return LaunchDescription([container])
