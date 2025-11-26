@@ -6,9 +6,12 @@ from launch_ros.descriptions import ComposableNode
 def generate_launch_description():
     # GStreamer pipelines for left & right cameras
     gscam_left_config = (
-        'v4l2src device=/dev/video0 ! '
-        'video/x-raw,format=YUY2,width=640,height=480,framerate=30/1 ! '
-        'videoconvert ! appsink'
+        'nvarguscamerasrc sensor-id=0 ! '
+        'video/x-raw(memory:NVMM), width=1280, height=720, format=NV12, framerate=30/1 ! '
+        'nvvidconv flip-method=0 ! '
+        'video/x-raw, width=640, height=480, format=RGBA ! '
+        'videoconvert ! '
+        'video/x-raw, format=RGB'
     )
 
     gscam_right_config = (
